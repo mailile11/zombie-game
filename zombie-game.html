@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<style>
+html,body{margin:0;padding:0;overflow:hidden;background:#0d0d11}
+canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+
+function resize(){
+ canvas.width=window.innerWidth;
+ canvas.height=window.innerHeight;
+}
+resize();
+window.addEventListener("resize",resize);
+
+window.addEventListener("contextmenu", e => e.preventDefault());
+
+function createPlayer(x,y,color){
+ return {
+  x,y,color,
+  radius:18,speed:3,
+  health:10,maxHealth:10,
+  swordAngle:0,
+  infinite:false,
+  infCooldown:0,
+  isDead: false,
+  reviveTimer: 0,
+  shootCooldown: 0,
+  currentWeapon: "sword",
+  hasGamepadAim: false 
+ };
+}
+
+let players=[
+ createPlayer(canvas.width/2-80,canvas.height/2,"#f4c2c2"),
+ createPlayer(canvas.width/2+80,canvas.height/2,"#884444")
+];
+
+let zombies=[];
+let bullets=[];
+let dummies=[]; 
+let wave=1;
+let pvpMode=false;
+let gCooldown=0;
+let qCooldown=0;      
+let pgdnCooldown=0;   
+let jCooldown=0; 
+let gameState = "MENU"; 
+const keys={};
+
+let p1GamepadId = -1;
+let p2GamepadId = -1;
+let menuTimer = 0; // For text pulsing effects
+
+window.addEventListener("keydown",e=>{
+  keys[e.key.toLowerCase()]=true;
+  if(gameState === "MENU" && e.key.toLowerCase() === "enter") {
+    gameState = "PLAYING";
+  }
+});
+window.addEventListener("keyup",e=>keys[e.key.toLowerCase()]=false);
+
+let mouseX = 0;
+let mouseY = 0;
+canvas.addEventListener("mousemove",e=>{
+ const r=canvas.getBoundingClientRect();
+ mouseX=e.clientX-r.left;
+ mouseY=e.clientY-r.top;
+});
+
+let isLeftClickPressed = false;
+canvas.addEventListener("mousedown",e=>{
+ if(e.button===0) isLeftClickPressed = true;
+ 
+ if(e.button===2){
+  const p=players[0];
+  if(p.isDead) return;
+  if(p.infCooldown<=0){
+   p.infinite=!p.infinite;
+   p.infCooldown=60;
+  }
+ }
+});
+window.addEventListener("mouseup",e=>{
+ if(e.button===0) isLeftClickPressed = false;
+});
+
+function spawnWave(){
+ const margin=60;
+ zombies.length = 0;
+ bullets.length = 0;
+ dummies.length = 0;
+ for(let i=0;i<wave;i++){
+  const isSpeed=Math.random()<0.2;
+  zombies.push({
+   x:margin+Math.random()*(canvas.width-margin*2),
+   y:margin+Math.random()*(canvas.height-margin*2),
+   radius:16,
+   speed:isSpeed?3:1+Math.random(),
+   health:5,maxHealth:5,
+   damage:1,
+   canHitPlayer:true,
+   swordContact:false,
+   color:isSpeed?"blue":"#4a8f4a"
+  });
+ }
+}
+spawnWave();
+
+function resetGame() {
+ wave = 1;
+ pvpMode = false;
+ isLeftClickPressed = false;
+ players.forEach((p, i) => {
+   p.health = p.maxHealth;
+   p.isDead = false;
+   p.infinite = false;
+   p.reviveTimer = 0;
+   p.shootCooldown = 0;
+   p.currentWeapon = "sword";
+   p.x = canvas.width / 2 + (i === 0 ? -80 : 80);
+   p.y = canvas.height / 2;
+ });
+ spawnWave();
+}
+
+function handleGamepads() {
+  const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+  if (!gamepads) return;
+
+  const BTN_X = 0;        
+  const BTN_SQUARE = 2;   
+  const BTN_TRIANGLE = 3; 
+  const BTN_LB = 4;       
+  const BTN_RT = 7;       
+  const BTN_DPAD_LEFT = 14;
+  const BTN_DPAD_RIGHT = 15;
+
+  const deadzone = 0.2;
+
+  if (gameState === "MENU") {
+    for (let i = 0; i < gamepads.length; i++) {
+      const gp = gamepads[i];
+      if (!gp) continue;
+
+      const clickedLeft = gp.axes[0] < -0.5 || gp.buttons[BTN_DPAD_LEFT]?.pressed;
+      const clickedRight = gp.axes[0] > 0.5 || gp.buttons[BTN_DPAD_RIGHT]?.pressed;
+
+      if (clickedLeft) {
+        p1GamepadId = i;
+        if (p2GamepadId === i) p2GamepadId = -1;
+      }
+      if (clickedRight) {
+        p2GamepadId = i;
+        if (p1GamepadId === i) p1GamepadId = -1;
+      }
+
+      if ((p1GamepadId === i || p2GamepadId === i) && gp.buttons[BTN_X]?.pressed) {
+        gameState = "PLAYING";
+      }
+    }
+    return;
+  }
+
+  if (p1GamepadId !== -1 && gamepads[p1GamepadId]) {
+    const gp = gamepads[p1GamepadId];
+    const moveX = gp.axes[0];
+    const moveY = gp.axes[1];
+
+    keys["d"] = moveX > deadzone;
+    keys["a"] = moveX < -deadzone;
+    keys["s"] = moveY > deadzone;
+    keys["w"] = moveY < -deadzone;
+
+    const aimX = gp.axes[2];
+    const aimY = gp.axes[3];
+    if (Math.hypot(aimX, aimY) > deadzone) {
+      players[0].swordAngle = Math.atan2(aimY, aimX);
+      players[0].hasGamepadAim = true;
+    } else {
+      players[0].hasGamepadAim = false;
+    }
+
+    keys["g"] = gp.buttons[BTN_LB]?.pressed;
+    keys["e"] = gp.buttons[BTN_SQUARE]?.pressed;        
+    keys["q"] = gp.buttons[BTN_TRIANGLE]?.pressed;     
+    isLeftClickPressed = gp.buttons[BTN_RT]?.pressed || gp.buttons[BTN_RT]?.value > 0.1;  
+  }
+
+  if (p2GamepadId !== -1 && gamepads[p2GamepadId]) {
+    const gp = gamepads[p2GamepadId];
+    const moveX = gp.axes[0];
+    const moveY = gp.axes[1];
+
+    keys["arrowright"] = moveX > deadzone;
+    keys["arrowleft"] = moveX < -deadzone;
+    keys["arrowdown"] = moveY > deadzone;
+    keys["arrowup"] = moveY < -deadzone;
+
+    const aimX = gp.axes[2];
+    const aimY = gp.axes[3];
+    if (Math.hypot(aimX, aimY) > deadzone) {
+      players[1].swordAngle = Math.atan2(aimY, aimX);
+      players[1].hasGamepadAim = true;
+    } else {
+      players[1].hasGamepadAim = false;
+    }
+
+    keys["g"] = gp.buttons[BTN_LB]?.pressed;
+    keys["/"] = gp.buttons[BTN_SQUARE]?.pressed;        
+    keys["pagedown"] = gp.buttons[BTN_TRIANGLE]?.pressed; 
+    keys["pageup"] = gp.buttons[BTN_RT]?.pressed || gp.buttons[BTN_RT]?.value > 0.1;       
+  }
+}
+
+function update(){
+ handleGamepads();
+
+ if (gameState === "MENU") {
+   menuTimer++;
+   return;
+ }
+
+ const p1=players[0];
+ const p2=players[1];
+
+ if(gCooldown>0) gCooldown--;
+ if(keys["g"] && gCooldown<=0){
+   pvpMode=!pvpMode;
+   gCooldown=20;
+   if(pvpMode){
+     zombies.length=0;
+   }else{
+     dummies.length=0;
+     if(zombies.length===0) spawnWave();
+   }
+ }
+
+ if(jCooldown > 0) jCooldown--;
+ if(pvpMode && keys["j"] && jCooldown <= 0) {
+   dummies.push({
+     x: mouseX,
+     y: mouseY,
+     radius: 16,
+     health: 30,
+     maxHealth: 30,
+     swordContact: false,
+     color: "#777777" 
+   });
+   jCooldown = 30; 
+ }
+
+ if(qCooldown > 0) qCooldown--;
+ if(wave >= 5 && keys["q"] && qCooldown <= 0 && !p1.isDead) {
+   p1.currentWeapon = p1.currentWeapon === "sword" ? "gun" : "sword";
+   qCooldown = 15;
+ }
+
+ if(pgdnCooldown > 0) pgdnCooldown--;
+ if(wave >= 5 && keys["pagedown"] && pgdnCooldown <= 0 && !p2.isDead) {
+   p2.currentWeapon = p2.currentWeapon === "sword" ? "gun" : "sword";
+   pgdnCooldown = 15;
+ }
+
+ if(!p1.isDead) {
+   if(keys["w"]) p1.y-=p1.speed;
+   if(keys["s"]) p1.y+=p1.speed;
+   if(keys["a"]) p1.x-=p1.speed;
+   if(keys["d"]) p1.x+=p1.speed;
+   
+   if (!p1.hasGamepadAim) {
+     p1.swordAngle=Math.atan2(mouseY-p1.y,mouseX-p1.x);
+   }
+
+   const p1MaxCooldown = wave >= 15 ? 4 : 15;
+
+   if(wave >= 5 && p1.currentWeapon === "gun" && isLeftClickPressed && p1.shootCooldown <= 0) {
+     bullets.push({
+       x: p1.x + Math.cos(p1.swordAngle) * 30,
+       y: p1.y + Math.sin(p1.swordAngle) * 30,
+       vx: Math.cos(p1.swordAngle) * 8,
+       vy: Math.sin(p1.swordAngle) * 8,
+       radius: 4,
+       owner: 0
+     });
+     p1.shootCooldown = p1MaxCooldown;
+   }
+ }
+
+ if(!p2.isDead) {
+   if(keys["arrowup"]) p2.y-=p2.speed;
+   if(keys["arrowdown"]) p2.y+=p2.speed;
+   if(keys["arrowleft"]) p2.x-=p2.speed;
+   if(keys["arrowright"]) p2.x+=p2.speed;
+
+   if (!p2.hasGamepadAim) {
+     let p2dx = 0;
+     let p2dy = 0;
+     if(keys["arrowleft"]) p2dx--;
+     if(keys["arrowright"]) p2dx++;
+     if(keys["arrowup"]) p2dy--;
+     if(keys["arrowdown"]) p2dy++;
+
+     if(p2dx !== 0 || p2dy !== 0){
+       p2.swordAngle = Math.atan2(p2dy, p2dx);
+     }
+   }
+
+   const p2MaxCooldown = wave >= 15 ? 4 : 15;
+
+   if(wave >= 5 && p2.currentWeapon === "gun" && keys["pageup"] && p2.shootCooldown <= 0) {
+     bullets.push({
+       x: p2.x + Math.cos(p2.swordAngle) * 30,
+       y: p2.y + Math.sin(p2.swordAngle) * 30,
+       vx: Math.cos(p2.swordAngle) * 8,
+       vy: Math.sin(p2.swordAngle) * 8,
+       radius: 4,
+       owner: 1
+     });
+     p2.shootCooldown = p2MaxCooldown;
+   }
+ }
+
+ players.forEach(p=>{
+   p.x=Math.max(p.radius,Math.min(canvas.width-p.radius,p.x));
+   p.y=Math.max(p.radius,Math.min(canvas.height-p.radius,p.y));
+   if(p.infCooldown>0) p.infCooldown--;
+   if(p.shootCooldown>0) p.shootCooldown--;
+ });
+
+ const distanceBetweenPlayers = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+ const reviveRange = 50;
+ const framesRequired = 5 * 60;
+
+ if (!p1.isDead && p2.isDead && keys["e"] && distanceBetweenPlayers <= reviveRange) {
+   p2.reviveTimer++;
+   if (p2.reviveTimer >= framesRequired) {
+     p2.isDead = false;
+     p2.health = p2.maxHealth / 2;
+     p2.reviveTimer = 0;
+   }
+ } else if (p2.isDead) {
+   p2.reviveTimer = 0;
+ }
+
+ if (!p2.isDead && p1.isDead && keys["/"] && distanceBetweenPlayers <= reviveRange) {
+   p1.reviveTimer++;
+   if (p1.reviveTimer >= framesRequired) {
+     p1.isDead = false;
+     p1.health = p1.maxHealth / 2;
+     p1.reviveTimer = 0;
+   }
+ } else if (p1.isDead) {
+   p1.reviveTimer = 0;
+ }
+
+ for(let bgi=bullets.length-1; bgi>=0; bgi--) {
+   const b = bullets[bgi];
+   b.x += b.vx;
+   b.y += b.vy;
+
+   if(b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
+     bullets.splice(bgi, 1);
+     continue;
+   }
+
+   let bulletRemoved = false;
+   
+   for(let zi=zombies.length-1; zi>=0; zi--) {
+     const z = zombies[zi];
+     if(Math.hypot(z.x - b.x, z.y - b.y) < z.radius + b.radius) {
+       z.health -= 2; 
+       bullets.splice(bgi, 1);
+       bulletRemoved = true;
+       if(z.health <= 0) zombies.splice(zi, 1);
+       break;
+     }
+   }
+   if(bulletRemoved) continue;
+
+   for(let di=dummies.length-1; di>=0; di--) {
+     const d = dummies[di];
+     if(Math.hypot(d.x - b.x, d.y - b.y) < d.radius + b.radius) {
+       d.health -= 2; 
+       bullets.splice(bgi, 1);
+       bulletRemoved = true;
+       if(d.health <= 0) dummies.splice(di, 1);
+       break;
+     }
+   }
+   if(bulletRemoved) continue;
+
+   if(pvpMode) {
+     const targetPlayerIndex = b.owner === 0 ? 1 : 0;
+     const tp = players[targetPlayerIndex];
+     if(!tp.isDead && Math.hypot(tp.x - b.x, tp.y - b.y) < tp.radius + b.radius) {
+       if(!tp.infinite) tp.health -= 2; 
+       bullets.splice(bgi, 1);
+     }
+   }
+ }
+
+ zombies.forEach((z,zi)=>{
+   let target = null;
+   if (!p1.isDead && !p2.isDead) {
+     const d1=Math.hypot(p1.x-z.x,p1.y-z.y);
+     const d2=Math.hypot(p2.x-z.x,p2.y-z.y);
+     target = d1<=d2 ? p1 : p2;
+   } else if (!p1.isDead) {
+     target = p1;
+   } else if (!p2.isDead) {
+     target = p2;
+   }
+
+   if(!target) return;
+
+   const dx=target.x-z.x;
+   const dy=target.y-z.y;
+   const dist=Math.hypot(dx,dy);
+   const minDist=target.radius+z.radius+5;
+
+   if(dist>minDist){
+     z.x+=(dx/dist)*z.speed;
+     z.y+=(dy/dist)*z.speed;
+   }
+
+   if(dist<=minDist && z.canHitPlayer){
+     if(!target.infinite) target.health-=z.damage;
+     z.canHitPlayer=false;
+     setTimeout(()=>z.canHitPlayer=true,800);
+   }
+ });
+
+ players.forEach((p,i)=>{
+   if(p.health<=0 && !p.isDead){
+     p.health=0;
+     p.isDead=true;
+   }
+ });
+
+ if(p1.isDead && p2.isDead){
+   resetGame();
+   gameState = "MENU"; 
+   return; 
+ }
+
+ players.forEach(player=>{
+   if(player.isDead || (wave >= 5 && player.currentWeapon !== "sword")) return; 
+
+   const swordLength=100;
+   for(let s=0;s<=10;s++){
+     const t=s/10;
+     const sx=player.x+Math.cos(player.swordAngle)*swordLength*t;
+     const sy=player.y+Math.sin(player.swordAngle)*swordLength*t;
+
+     zombies.forEach((z,zi)=>{
+       const touching=Math.hypot(z.x-sx,z.y-sy)<z.radius+6;
+       if(touching){
+         if(!z.swordContact){
+           z.health--;
+           z.swordContact=true;
+           if(z.health <= 0) zombies.splice(zi,1);
+         }
+       }else{
+         z.swordContact=false;
+       }
+     });
+
+     dummies.forEach((d,di)=>{
+       const touching=Math.hypot(d.x-sx,d.y-sy)<d.radius+6;
+       if(touching){
+         if(!d.swordContact){
+           d.health--;
+           d.swordContact=true;
+           if(d.health <= 0) dummies.splice(di,1);
+         }
+       }else{
+         d.swordContact=false;
+       }
+     });
+   }
+ });
+
+ if(pvpMode && !p1.isDead && !p2.isDead){
+   const len=100;
+   if(wave < 5 || p1.currentWeapon === "sword") {
+     const p1x=p1.x+Math.cos(p1.swordAngle)*len;
+     const p1y=p1.y+Math.sin(p1.swordAngle)*len;
+     if(Math.hypot(p2.x-p1x,p2.y-p1y)<p2.radius+10) p2.health-=0.1;
+   }
+
+   if(wave < 5 || p2.currentWeapon === "sword") {
+     const p2x=p2.x+Math.cos(p2.swordAngle)*len;
+     const p2y=p2.y+Math.sin(p2.swordAngle)*len;
+     if(Math.hypot(p1.x-p2x,p1.y-p2y)<p1.radius+10) p1.health-=0.1;
+   }
+ }
+
+ if(!pvpMode && zombies.length===0 && (!p1.isDead || !p2.isDead)){
+   wave++;
+   spawnWave();
+ }
+}
+
+function drawGrass(){
+ const size=40;
+ for(let x=0;x<canvas.width;x+=size){
+  for(let y=0;y<canvas.height;y+=size){
+   ctx.fillStyle=((x+y)/size)%2===0?"#2f8f2f":"#267a26";
+   ctx.fillRect(x,y,size,size);
+  }
+ }
+}
+
+function drawMenu() {
+  // Rich background aesthetic
+  let bgGradient = ctx.createRadialGradient(canvas.width/2, canvas.height/2, 50, canvas.width/2, canvas.height/2, canvas.width);
+  bgGradient.addColorStop(0, "#1a1a24");
+  bgGradient.addColorStop(1, "#0a0a0f");
+  ctx.fillStyle = bgGradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Decorative grid panel box
+  let boxW = Math.min(canvas.width - 40, 750);
+  let boxH = 430;
+  let boxX = canvas.width / 2 - boxW / 2;
+  let boxY = canvas.height / 2 - boxH / 2;
+
+  ctx.strokeStyle = "rgba(74, 143, 74, 0.25)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+  // Neon pulsed border edge line highlights
+  let pulseEdge = Math.abs(Math.sin(menuTimer * 0.04));
+  ctx.strokeStyle = `rgba(136, 204, 255, ${0.1 + pulseEdge * 0.4})`;
+  ctx.lineWidth = 4;
+  ctx.strokeRect(boxX - 4, boxY - 4, boxW + 8, boxH + 8);
+
+  ctx.textAlign = "center";
+  
+  // Game Main Header title shadow + overlay text
+  ctx.font = "black bold 52px Arial";
+  ctx.fillStyle = "#112211";
+  ctx.fillText("ZOMBIE SURVIVAL CO-OP", canvas.width / 2 + 3, boxY + 65);
+  ctx.fillStyle = "#4a8f4a";
+  ctx.fillText("ZOMBIE SURVIVAL CO-OP", canvas.width / 2, boxY + 60);
+
+  // Sub heading separator line
+  ctx.fillStyle = "rgba(255,255,255,0.1)";
+  ctx.fillRect(boxX + 50, boxY + 95, boxW - 100, 2);
+
+  // KEYBOARD CONTROLS HUD CONTAINER SECTION 
+  let keyBoxY = boxY + 120;
+  ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
+  ctx.fillRect(boxX + 40, keyBoxY, boxW - 80, 75);
+  ctx.strokeStyle = "rgba(255,255,255,0.1)";
+  ctx.strokeRect(boxX + 40, keyBoxY, boxW - 80, 75);
+
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 14px Arial";
+  ctx.fillText("KEYBOARD SETUP CONFIG", canvas.width / 2, keyBoxY + 22);
+  ctx.font = "16px Arial";
+  ctx.fillStyle = "#dddddd";
+  ctx.fillText("Press W for P1 Keyboard   |   Press UP ARROW for P2 Keyboard", canvas.width / 2, keyBoxY + 52);
+
+  // CONTROLLER CONTROLS HUD CONTAINER SECTION
+  let padBoxY = boxY + 215;
+  ctx.fillStyle = "rgba(136, 204, 255, 0.03)";
+  ctx.fillRect(boxX + 40, padBoxY, boxW - 80, 110);
+  ctx.strokeStyle = "rgba(136, 204, 255, 0.15)";
+  ctx.strokeRect(boxX + 40, padBoxY, boxW - 80, 110);
+
+  ctx.fillStyle = "#88ccff";
+  ctx.font = "bold 14px Arial";
+  ctx.fillText("GAMEPAD CONTROLLER SETUP", canvas.width / 2, padBoxY + 22);
+  ctx.font = "16px Arial";
+  ctx.fillStyle = "#b0dfff";
+  ctx.fillText("Click LEFT ARROW for P1 Controller   |   Click RIGHT ARROW for P2 Controller", canvas.width / 2, padBoxY + 50);
+
+  // Live Slot Assignment Output labels
+  ctx.font = "bold 13px Arial";
+  // P1 Assignment Indicator status bar text
+  if (p1GamepadId !== -1) {
+    ctx.fillStyle = "#55ff55";
+    ctx.fillText("P1 CONTROLLER: READY [PORT " + (p1GamepadId + 1) + "]", canvas.width / 2 - 160, padBoxY + 88);
+  } else {
+    ctx.fillStyle = "#ff6666";
+    ctx.fillText("P1 CONTROLLER: [NOT BOUND]", canvas.width / 2 - 160, padBoxY + 88);
+  }
+  
+  // P2 Assignment Indicator status bar text
+  if (p2GamepadId !== -1) {
+    ctx.fillStyle = "#55ff55";
+    ctx.fillText("P2 CONTROLLER: READY [PORT " + (p2GamepadId + 1) + "]", canvas.width / 2 + 160, padBoxY + 88);
+  } else {
+    ctx.fillStyle = "#ff6666";
+    ctx.fillText("P2 CONTROLLER: [NOT BOUND]", canvas.width / 2 + 160, padBoxY + 88);
+  }
+
+  // BOTTOM INTERACTIVE ACTION SYSTEM TRIGGER BUTTON PROMPTS
+  let actionBoxY = boxY + 345;
+  let textAlphaPulse = 0.4 + Math.abs(Math.sin(menuTimer * 0.07)) * 0.6;
+  ctx.font = "bold 24px Arial";
+
+  let hasAssignedGamepad = (p1GamepadId !== -1 || p2GamepadId !== -1);
+
+  if(hasAssignedGamepad) {
+    ctx.fillStyle = `rgba(255, 255, 0, ${textAlphaPulse})`;
+    ctx.fillText("PRESS [X] ON CONTROLLER TO START GAME", canvas.width / 2, actionBoxY + 30);
+  } else {
+    ctx.fillStyle = `rgba(255, 235, 50, ${textAlphaPulse})`;
+    ctx.fillText("PRESS ENTER KEY TO START GAME", canvas.width / 2, actionBoxY + 30);
+  }
+  
+  // Sub text info tips
+  ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+  ctx.font = "italic 13px Arial";
+  ctx.fillText("(If your gamepad does not respond immediately, press any face button on it to wake it up)", canvas.width / 2, actionBoxY + 60);
+  
+  ctx.textAlign = "left";
+}
+
+function draw(){
+ drawGrass();
+
+ if (gameState === "MENU") {
+   drawMenu();
+   return;
+ }
+
+ players.forEach((p,i)=>{
+  ctx.save();
+  if(p.isDead) {
+    ctx.globalAlpha = 0.4;
+  }
+
+  ctx.fillStyle=p.color;
+  ctx.strokeStyle="black";
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.ellipse(p.x,p.y,12,18,0,0,Math.PI*2);
+  ctx.fill();
+  ctx.stroke();
+
+  if(!p.isDead) {
+    ctx.beginPath();
+    if(wave >= 5 && p.currentWeapon === "gun") {
+      ctx.strokeStyle="#444444";
+      ctx.lineWidth=8;
+      ctx.moveTo(p.x,p.y);
+      ctx.lineTo(p.x+Math.cos(p.swordAngle)*35,p.y+Math.sin(p.swordAngle)*35);
+    } else {
+      ctx.strokeStyle="silver";
+      ctx.lineWidth=6;
+      ctx.moveTo(p.x,p.y);
+      ctx.lineTo(p.x+Math.cos(p.swordAngle)*100,p.y+Math.sin(p.swordAngle)*100);
+    }
+    ctx.stroke();
+  }
+
+  ctx.restore();
+
+  if (p.isDead && p.reviveTimer > 0) {
+    ctx.strokeStyle = "cyan";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y - 30, 10, -Math.PI / 2, (-Math.PI / 2) + (Math.PI * 2 * (p.reviveTimer / 300)));
+    ctx.stroke();
+    
+    ctx.fillStyle = "white";
+    ctx.font = "10px Arial";
+    ctx.fillText("REVIVING", p.x - 22, p.y - 48);
+  }
+
+  const y=i===0?20:45;
+  ctx.fillStyle="red";
+  ctx.fillRect(20,y,200,15);
+  ctx.fillStyle=p.infinite?"cyan":"lime";
+  ctx.fillRect(20,y,200*(p.health/p.maxHealth),15);
+
+  ctx.fillStyle="white";
+  ctx.font="14px Arial";
+  
+  let activeWep = "";
+  if (wave >= 15 && p.currentWeapon === "gun") {
+    activeWep = " [RAPID GUN]";
+  } else if (wave >= 5) {
+    activeWep = ` [${p.currentWeapon.toUpperCase()}]`;
+  }
+  
+  ctx.fillText((i===0?"P1":"P2") + (p.isDead ? " (GHOST)" : activeWep),230,y+13);
+ });
+
+ bullets.forEach(b => {
+   ctx.fillStyle = "yellow";
+   ctx.beginPath();
+   ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+   ctx.fill();
+ });
+
+ dummies.forEach(d=>{
+  ctx.fillStyle=d.color;
+  ctx.beginPath();
+  ctx.ellipse(d.x,d.y,12,16,0,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.fillStyle="red";
+  ctx.fillRect(d.x-20,d.y-28,40,5);
+  ctx.fillStyle="lime";
+  ctx.fillRect(d.x-20,d.y-28,40*(d.health/d.maxHealth),5);
+ });
+
+ zombies.forEach(z=>{
+  ctx.fillStyle=z.color;
+  ctx.beginPath();
+  ctx.ellipse(z.x,z.y,12,16,0,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.fillStyle="red";
+  ctx.fillRect(z.x-20,z.y-28,40,5);
+  ctx.fillStyle="lime";
+  ctx.fillRect(z.x-20,z.y-28,40*(z.health/z.maxHealth),5);
+ });
+
+ ctx.fillStyle="white";
+ ctx.font="20px Arial";
+ ctx.fillText("Wave: "+wave,canvas.width/2-40,90);
+ ctx.fillText("Mode: "+(pvpMode?"PVP":"ZOMBIES"),canvas.width/2-70,120);
+}
+
+function loop(){
+ update();
+ draw();
+ requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
